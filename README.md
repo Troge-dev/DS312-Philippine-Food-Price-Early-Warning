@@ -4,6 +4,7 @@
 [![Academic Year](https://img.shields.io/badge/Academic%20Year-2026--2027%20(1st%20Sem)-2E5B88?style=flat-square)](https://github.com/Troge-dev)
 [![Data Source: UN WFP / HDX](https://img.shields.io/badge/Data-UN%20WFP%20%7C%20HDX-D9381E?style=flat-square)](https://data.humdata.org/dataset/wfp-food-prices-for-philippines)
 [![Complexity Tier](https://img.shields.io/badge/Rubric%20Tier-Advanced%20(8%2F8%20Pts)-2E7D32?style=flat-square)](https://github.com/Troge-dev)
+[![Model ROC-AUC](https://img.shields.io/badge/Test%20ROC--AUC-0.8954-brightgreen?style=flat-square)](https://github.com/Troge-dev)
 [![License: CC-BY 4.0](https://img.shields.io/badge/License-CC--BY%204.0-gray?style=flat-square)](https://creativecommons.org/licenses/by/4.0/)
 
 > **DS312 Final Project (Phase 1 to Phase 5)**  
@@ -58,7 +59,103 @@ Rather than analyzing rice in isolation, this study curates an **8-commodity rep
 
 ---
 
-## 5. Repository Structure
+## 5. Mathematical Feature Architecture ($X$ and $Y$)
+
+> **Zero External Datasets or API Keys Required:**  
+> All 12 predictive features ($X$) and the forward target ($Y$) are mathematically derived strictly from the local WFP datasets (`wfp_food_prices_phl.csv` and `wfp_markets_phl.csv`) using Pandas and NumPy vectorized feature engineering.
+
+### Target Formulation ($Y_{t+1}$)
+Let the 1-month forward percentage price change be:
+$$R_{t+1} = \frac{\text{Price}_{t+1} - \text{Price}_t}{\text{Price}_t}$$
+
+We formulate the early-warning binary classification target:
+$$Y_{t+1} = \begin{cases} 
+1 & \text{if } R_{t+1} \ge +0.20 \quad \text{(Acute Price Spike Alert: } \ge 20\% \text{ surge)} \\
+0 & \text{otherwise} \quad \text{(Normal / Controlled Inflation)}
+\end{cases}$$
+
+### The 12 Predictive Features ($X$)
+Every feature is computed strictly using historical timestamps ($t \le \text{current}$) to ensure zero data leakage:
+
+| Category | Feature Name | Source | Mathematical Formula / Derivation |
+| :--- | :--- | :--- | :--- |
+| **Price & Momentum** | `price` | `price` | Current observed retail price in ₱/kg. |
+| | `return_1m` | `price` | $(\text{Price}_t - \text{Price}_{t-1}) / \text{Price}_{t-1}$ (1-month past momentum). |
+| | `return_3m` | `price` | $(\text{Price}_t - \text{Price}_{t-3}) / \text{Price}_{t-3}$ (Quarterly price trend). |
+| | `return_12m` | `price` | $(\text{Price}_t - \text{Price}_{t-12}) / \text{Price}_{t-12}$ (Year-over-year inflation baseline). |
+| **Market Volatility** | `price_cv_6m` | `price` | Rolling 6-month Coefficient of Variation: $\sigma_{\text{rolling}, 6} / \mu_{\text{rolling}, 6}$. |
+| **Calendar & Seasons** | `month_sin` | `date` | $\sin(2\pi \times \text{month} / 12)$ (Cyclical seasonal position). |
+| | `month_cos` | `date` | $\cos(2\pi \times \text{month} / 12)$ (Cyclical seasonal position). |
+| | `is_typhoon_quarter`| `date` | Binary indicator ($1$ for Q3: July, August, September; $0$ otherwise). |
+| | `is_ber_months` | `date` | Binary indicator ($1$ for Sept to Dec holiday surge; $0$ otherwise). |
+| **Logistics & Geography** | `dist_to_ncr_km` | `lat`, `lon` | Great-circle Haversine distance in km from market coordinates to Manila. |
+| | `is_island` | `admin2` | Binary flag ($1$ if island province: Palawan, Cebu, Bohol, Sulu; $0$ if mainland). |
+| **Commodity Biology** | `perishability_tier`| `commodity` | Categorical ordinal: $3$ = High (Tomatoes, Cabbage), $2$ = Medium (Meat, Onions, Eggs), $1$ = Low (Rice). |
+
+---
+
+## 6. End-to-End Pipeline & Live Benchmark Performance
+
+The complete analytical pipeline is implemented in [`scripts/pipeline.py`](scripts/pipeline.py). It runs entirely offline in under 15 seconds.
+
+```text
+[Raw WFP Tables] ──▶ 1. Ingestion & Basket Filtering (60,011 rows)
+                              │
+                              ▼
+                     2. Feature Engineering (47,646 clean modeling matrix)
+                              │
+             ┌────────────────┴────────────────┐
+             ▼                                 ▼
+3. Unsupervised K-Means            4. Supervised LightGBM
+   (4 Market Vulnerability Clusters)  (Temporal Out-of-Time Split)
+             │                                 │
+             └────────────────┬────────────────┘
+                              ▼
+                     5. Automated Surveillance Bulletin (Risk Tiers)
+```
+
+### Empirical Results from Live Execution
+
+#### A. Discovered Market Vulnerability Archetypes (K-Means, $k=4$)
+```text
+=== DISCOVERED MARKET VULNERABILITY ARCHETYPES ===
+                                                        market_count  avg_volatility spike_frequency  avg_dist_km
+cluster_name                                                                                                     
+Cluster 0: Mainland Production Basins (Low Volatility)            25        0.067082            3.2%   587.8 km
+Cluster 1: Urban Consumption Hubs (Fast Transmission)             19        0.090741            6.1%   890.3 km
+Cluster 2: Isolated Island Ports (Logistics Friction)             17        0.077130            4.4%   575.3 km
+Cluster 3: Shock Amplifiers (High Volatility)                     36        0.119363            7.9%   218.7 km
+```
+
+#### B. Out-of-Time Early Warning Model Evaluation (Test Period: 2023–2026)
+* **Out-of-Time Test Sample:** 25,146 observations across 108 markets.
+* **Test ROC-AUC Score:** **`0.8954`** *(Beats dummy baseline by 39.5 percentage points)*.
+* **Precision-Recall AUC:** **`0.3338`** *(Nearly 7× higher than the 0.0497 random minority baseline)*.
+* **Price Spike Recall:** **`68.6%`** *(Correctly detects ~70% of all localized price spikes 30 days ahead)*.
+* **Top Predictive Features:**
+  1. `price` (Current baseline level)
+  2. `price_cv_6m` (Rolling 6-month volatility)
+  3. `return_1m` (Short-term momentum)
+  4. `return_12m` (Annual inflation anchor)
+  5. `month_cos` (Cyclical monsoon/typhoon seasons)
+
+#### C. Sample Early Warning Surveillance Output (August 2026 Bulletin)
+```text
+=== PALENGKE EARLY WARNING SURVEILLANCE BULLETIN ===
+Surveillance Date: August 2026 | Total Monitored Market-Commodity Pairs: 580
+
+   market              admin2 commodity  price  predicted_spike_prob                    risk_tier
+   Ilocos Norte        Ilocos Norte   Cabbage  60.00              0.913911 [HIGH RISK] (Spike Imminent)
+           Abra                Abra   Cabbage  63.75              0.909792 [HIGH RISK] (Spike Imminent)
+   Metro Manila Metropolitan Manila   Cabbage 105.29              0.906807 [HIGH RISK] (Spike Imminent)
+     Pangasinan          Pangasinan   Cabbage  45.63              0.901900 [HIGH RISK] (Spike Imminent)
+         Ifugao              Ifugao   Cabbage  54.29              0.894940 [HIGH RISK] (Spike Imminent)
+Camarines Norte     Camarines Norte  Tomatoes 113.57              0.876703 [HIGH RISK] (Spike Imminent)
+```
+
+---
+
+## 7. Repository Structure
 
 ```text
 DS312-Philippine-Food-Price-Early-Warning/
@@ -73,8 +170,10 @@ DS312-Philippine-Food-Price-Early-Warning/
 │   ├── DS312_Phase1_Project_Proposal_Food_Security_Times_New_Roman.docx # Formal Proposal
 │   └── DS312_Phase1_Project_Proposal_Food_Security.docx
 ├── scripts/
+│   ├── pipeline.py                   # Complete end-to-end data mining pipeline
 │   ├── download_data.py              # Automated HDX dataset downloader
 │   ├── create_proposal_docx.py       # Proposal document generator
+│   ├── create_proposal_docx_updated.py
 │   └── create_phase1_notebook.py     # Master notebook builder
 ├── .gitignore
 ├── README.md
@@ -83,7 +182,7 @@ DS312-Philippine-Food-Price-Early-Warning/
 
 ---
 
-## 6. Project Timeline & Milestones
+## 8. Project Timeline & Milestones
 
 | Phase | Focus & Deliverables | Dates | Deadline |
 | :---: | :--- | :--- | :--- |
@@ -95,7 +194,7 @@ DS312-Philippine-Food-Price-Early-Warning/
 
 ---
 
-## 7. Quickstart & Replication
+## 9. Quickstart & Replication
 
 ### 1. Clone Repository & Setup Environment
 ```bash
@@ -105,7 +204,7 @@ cd DS312-Philippine-Food-Price-Early-Warning
 
 ### 2. Install Dependencies
 ```bash
-pip install pandas numpy matplotlib seaborn scikit-learn lightgbm xgboost requests python-docx nbformat nbclient
+pip install pandas numpy matplotlib seaborn scikit-learn lightgbm requests python-docx nbformat nbclient
 ```
 
 ### 3. Verify or Download Dataset
@@ -113,14 +212,19 @@ pip install pandas numpy matplotlib seaborn scikit-learn lightgbm xgboost reques
 python scripts/download_data.py
 ```
 
-### 4. Run the Phase 1 Notebook
+### 4. Run the End-to-End Pipeline
+```bash
+python scripts/pipeline.py
+```
+
+### 5. Inspect the Phase 1 Notebook
 ```bash
 jupyter notebook notebooks/DS312_Phase1_Food_Price_Early_Warning.ipynb
 ```
 
 ---
 
-## 8. Authors & Team Contributions
+## 10. Authors & Team Contributions
 
 * **Student 1 (Data Engineering Lead):** Data ingestion, relational table joins, preprocessing log, and pipeline reproducibility.
 * **Student 2 (EDA & Visualization Lead):** Statistical hypothesis testing (Welch's t-test, ANOVA), visual profiling, and geospatial mapping.
